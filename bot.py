@@ -565,6 +565,9 @@ async def main():
     print("Initializing Database...")
     await init_db()
     
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
+        raise ValueError("❌ BOT_TOKEN is missing or invalid in your .env file! Please set BOT_TOKEN in .env")
+        
     print("Starting Telethon Bot...")
     await bot.start(bot_token=BOT_TOKEN)
     me = await bot.get_me()
