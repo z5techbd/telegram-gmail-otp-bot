@@ -84,87 +84,14 @@ active_tempmail_watchers = {}
 tempmail_watcher_end_times = {}
 user_tempmail_msg_ids = {}
 
-def start_gmail_auto_watcher(user_id: int, chat_id: int = None, duration_seconds: int = None, interval: float = 0.4):
-    """Starts/extends a background auto-watcher to push new Telegram OTPs instantly (None = permanent 24/7)."""
-    target_peer = chat_id or user_id
-    loop = asyncio.get_event_loop()
-    
-    # Extend timer (None means infinite 24/7 watching)
-    if duration_seconds is None:
-        watcher_end_times[user_id] = float('inf')
-    else:
-        watcher_end_times[user_id] = loop.time() + duration_seconds
-    
-    # If already running for this user, timer is refreshed
-    if user_id in active_watchers and not active_watchers[user_id].done():
-        print(f"[AutoWatcher] Watcher timer refreshed for user {user_id}")
-        return
-
-    async def _watcher_loop():
-        print(f"[AutoWatcher] ⚡ Ultra-Fast Watcher Started for user {user_id} (Target: {target_peer}, Interval: {interval}s)")
-        gmail_acc = await get_gmail_account(user_id)
-        if not gmail_acc:
-            return
-            
-        access_token = gmail_acc["access_token"]
-        refresh_tok = gmail_acc.get("refresh_token")
-        last_delivered_msg_id = gmail_acc.get("last_msg_id")
-
-        conn = aiohttp.TCPConnector(limit=5, keepalive_timeout=60)
-        async with aiohttp.ClientSession(connector=conn) as session:
-            while loop.time() < watcher_end_times.get(user_id, 0):
-                try:
-                    # Zero-delay raw timeline check
-                    fast_res = await fetch_fast_latest_gmail_otp(session, access_token, known_last_msg_id=last_delivered_msg_id)
-                    
-                    # Handle token expiry seamlessly
-                    if fast_res.get("auth_failed") and refresh_tok:
-                        rf_res = await refresh_access_token(refresh_tok)
-                        if rf_res.get("success"):
-                            access_token = rf_res["access_token"]
-                            await save_gmail_account(user_id, gmail_acc["email"], access_token, refresh_tok, rf_res["expires_in"])
-                            fast_res = await fetch_fast_latest_gmail_otp(session, access_token, known_last_msg_id=last_delivered_msg_id)
-                            
-                    if fast_res.get("has_new"):
-                        found_otp = fast_res.get("otp")
-                        found_msg_id = fast_res.get("id")
-                        
-                        if found_otp and found_msg_id and found_msg_id != last_delivered_msg_id:
-                            print(f"[AutoWatcher] ⚡ INSTANT OTP DETECTED: {found_otp} (Msg ID: {found_msg_id}) for user {user_id}")
-                            last_delivered_msg_id = found_msg_id
-                            await update_last_delivered_otp(user_id, found_msg_id, found_otp)
-                            try:
-                                otp_msg_text = f"{TG_STAR} <b>New OTP Received</b>"
-                                await bot.send_message(target_peer, otp_msg_text, parse_mode="html", buttons=get_otp_delivery_menu(found_otp))
-                                print(f"[AutoWatcher] ✅ Instant OTP {found_otp} sent to {target_peer}!")
-                            except Exception as send_err:
-                                print(f"[AutoWatcher] ❌ Error sending message to {target_peer}: {send_err}")
-                except asyncio.CancelledError:
-                    print(f"[AutoWatcher] Watcher cancelled for user {user_id}")
-                    return
-                except Exception as e:
-                    print(f"[AutoWatcher] Error in loop for {user_id}: {e}")
-                await asyncio.sleep(interval)
-
-        # When finite timer expires, edit active variant message in-place to "Gmail Expired"
-        if loop.time() >= watcher_end_times.get(user_id, 0) and watcher_end_times.get(user_id, 0) != float('inf'):
-            print(f"[AutoWatcher] Watcher expired for user {user_id}")
-            var_msg_id = user_variant_msg_ids.get(user_id)
-            if var_msg_id:
-                try:
-                    await bot.edit_message(
-                        target_peer,
-                        var_msg_id,
-                        "⚠️ <b>Gmail Expired</b>",
-                        parse_mode="html",
-                        buttons=get_gmail_expired_menu()
-                    )
-                    print(f"[AutoWatcher] Edited message {var_msg_id} to Gmail Expired for user {user_id}")
-                except Exception as err:
-                    print(f"[AutoWatcher] Error editing expired message for user {user_id}: {err}")
-
-    task = asyncio.create_task(_watcher_loop())
-    active_watchers[user_id] = task
+async def register_gmail_webhook(user_id: int):
+    """Registers Gmail Pub/Sub Webhook Watch with Google for pure Push Webhook mode (no polling)."""
+    gmail_acc = await get_gmail_account(user_id)
+    if gmail_acc and GOOGLE_PUBSUB_TOPIC and gmail_acc.get("access_token"):
+        w_res = await setup_gmail_watch(gmail_acc["access_token"], GOOGLE_PUBSUB_TOPIC)
+        print(f"[WebhookSetup] Gmail Webhook watch registered for user {user_id}: {w_res.get('success')}")
+        return w_res
+    return {"success": False}
 
 def start_tempmail_auto_watcher(user_id: int, chat_id: int = None, duration_seconds: int = 300, interval: float = 1.8):
     """Starts/extends a background auto-watcher for TempMail OTPs with rate-limit protection."""
@@ -423,8 +350,8 @@ async def callback_dispatcher(event):
         )
         user_variant_msg_ids[user_id] = sent_msg.id
         
-        # Start 5-minute background auto-watcher for incoming OTPs
-        start_gmail_auto_watcher(user_id, event.chat_id or user_id, duration_seconds=300, interval=0.4)
+        # Register Gmail Webhook Push with Google
+        await register_gmail_webhook(user_id)
         
         await event.answer("Generated variants!")
 
@@ -435,8 +362,6 @@ async def callback_dispatcher(event):
             await event.respond("<code>No Gmail login found</code>", parse_mode="html")
             await event.answer()
             return
-            
-        start_gmail_auto_watcher(user_id, event.chat_id or user_id, duration_seconds=300, interval=0.4)
             
         access_token = gmail_acc["access_token"]
         last_delivered_msg_id = gmail_acc.get("last_msg_id")
@@ -560,12 +485,11 @@ async def callback_dispatcher(event):
 
 # ==================== BOT STARTUP ====================
 
-async def start_all_permanent_watchers():
+async def start_all_gmail_webhooks():
     all_accounts = await get_all_gmail_accounts()
-    print(f"[Startup] Restoring 24/7 background watchers for {len(all_accounts)} connected Gmail account(s)...")
+    print(f"[Startup] Registering Gmail Pub/Sub Webhook Push for {len(all_accounts)} connected Gmail account(s)...")
     for acc in all_accounts:
         user_id = acc["user_id"]
-        start_gmail_auto_watcher(user_id, duration_seconds=None, interval=0.4)
         if GOOGLE_PUBSUB_TOPIC and acc.get("access_token"):
             w_res = await setup_gmail_watch(acc["access_token"], GOOGLE_PUBSUB_TOPIC)
             print(f"[Startup] Gmail watch for user {user_id} setup status: {w_res.get('success')}")
@@ -582,8 +506,8 @@ async def main():
     me = await bot.get_me()
     print(f"Bot started successfully as @{me.username} ({me.first_name})")
     
-    # Restore permanent 24/7 watchers for all connected accounts
-    await start_all_permanent_watchers()
+    # Register Gmail Pub/Sub Webhooks on startup
+    await start_all_gmail_webhooks()
 
     # Start Webhook HTTP Server
     app = create_webhook_app(bot_instance=bot)
