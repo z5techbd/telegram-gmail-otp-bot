@@ -63,6 +63,15 @@ from utils.tempmail_api import (
     fetch_tempmail_messages
 )
 from utils.webhook_server import create_webhook_app
+from utils.emojis import (
+    TG_STAR,
+    TG_DIAMOND,
+    TG_PHONE,
+    TG_KEY,
+    TG_TRASH,
+    TG_EMPTY,
+    TG_WARN
+)
 
 bot = TelegramClient("gtmail_bot_session", API_ID, API_HASH)
 
