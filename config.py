@@ -17,6 +17,6 @@ CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 DB_PATH = os.path.join(BASE_DIR, "bot_data.db")
 
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
-WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "2026"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 GOOGLE_PUBSUB_TOPIC = os.getenv("GOOGLE_PUBSUB_TOPIC", "")
