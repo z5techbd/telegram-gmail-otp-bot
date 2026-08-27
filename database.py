@@ -116,6 +116,23 @@ async def get_gmail_account(user_id: int):
                 }
     return None
 
+async def get_all_gmail_accounts():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id, email, access_token, refresh_token, expires_at, last_otp, last_msg_id FROM gmail_accounts") as cursor:
+            rows = await cursor.fetchall()
+            out = []
+            for r in rows:
+                out.append({
+                    "user_id": r[0],
+                    "email": r[1],
+                    "access_token": r[2],
+                    "refresh_token": r[3],
+                    "expires_at": r[4],
+                    "last_otp": r[5],
+                    "last_msg_id": r[6]
+                })
+            return out
+
 async def update_last_delivered_otp(user_id: int, msg_id: str, otp: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE gmail_accounts SET last_msg_id = ?, last_otp = ? WHERE user_id = ?", (msg_id, otp, user_id))

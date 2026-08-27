@@ -90,6 +90,29 @@ async def get_user_gmail_profile(access_token: str) -> dict:
                 return {"success": True, "email": data.get("emailAddress")}
             return {"success": False, "error": "Profile fetch failed"}
 
+async def setup_gmail_watch(access_token: str, topic_name: str) -> dict:
+    """Subscribes Gmail mailbox to Google Cloud Pub/Sub Push Webhook notifications."""
+    if not topic_name:
+        return {"success": False, "error": "No Pub/Sub topic provided"}
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    payload = {
+        "topicName": topic_name,
+        "labelIds": ["INBOX"]
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{GMAIL_API_BASE}/watch", headers=headers, json=payload) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {"success": True, "historyId": data.get("historyId"), "expiration": data.get("expiration")}
+            data = await resp.json()
+            return {"success": False, "error": data.get("error", {}).get("message", "Failed to setup Gmail watch")}
+
+async def stop_gmail_watch(access_token: str) -> dict:
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{GMAIL_API_BASE}/stop", headers=headers) as resp:
+            return {"success": resp.status in (200, 204)}
+
 def extract_telegram_5digit_otp(subject: str, snippet: str, sender: str) -> str:
     """Specifically extracts Telegram OTP code (supports both 5-digit login codes and 6-digit verification codes)."""
     # 1. Subject match: "Your Code - 785197" or "Your Code - 72694"

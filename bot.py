@@ -30,15 +30,6 @@ from database import (
     update_last_delivered_tempmail_otp,
     delete_tempmail
 )
-from utils.emojis import (
-    TG_STAR,
-    TG_DIAMOND,
-    TG_PHONE,
-    TG_KEY,
-    TG_TRASH,
-    TG_EMPTY,
-    TG_WARN
-)
 from utils.keyboards import (
     get_main_persistent_menu,
     get_start_inline_menu,
@@ -58,13 +49,15 @@ from utils.gmail_api import (
     refresh_access_token,
     get_user_gmail_profile,
     fetch_fast_latest_gmail_otp,
-    fetch_latest_gmail_messages
+    fetch_latest_gmail_messages,
+    setup_gmail_watch
 )
 from utils.tempmail_api import (
     create_tempmail_account,
     fetch_fast_tempmail_otp,
     fetch_tempmail_messages
 )
+from utils.webhook_server import create_webhook_app
 
 bot = TelegramClient("gtmail_bot_session", API_ID, API_HASH)
 
@@ -77,17 +70,20 @@ active_tempmail_watchers = {}
 tempmail_watcher_end_times = {}
 user_tempmail_msg_ids = {}
 
-def start_gmail_auto_watcher(user_id: int, chat_id: int = None, duration_seconds: int = 300, interval: float = 0.4):
-    """Starts/extends a background auto-watcher for 5 minutes to push new Telegram OTPs instantly."""
+def start_gmail_auto_watcher(user_id: int, chat_id: int = None, duration_seconds: int = None, interval: float = 0.4):
+    """Starts/extends a background auto-watcher to push new Telegram OTPs instantly (None = permanent 24/7)."""
     target_peer = chat_id or user_id
     loop = asyncio.get_event_loop()
     
-    # Extend timer
-    watcher_end_times[user_id] = loop.time() + duration_seconds
+    # Extend timer (None means infinite 24/7 watching)
+    if duration_seconds is None:
+        watcher_end_times[user_id] = float('inf')
+    else:
+        watcher_end_times[user_id] = loop.time() + duration_seconds
     
-    # If already running for this user, timer is refreshed to 5m from current click
+    # If already running for this user, timer is refreshed
     if user_id in active_watchers and not active_watchers[user_id].done():
-        print(f"[AutoWatcher] Watcher timer refreshed for user {user_id} (5m from now)")
+        print(f"[AutoWatcher] Watcher timer refreshed for user {user_id}")
         return
 
     async def _watcher_loop():
@@ -136,9 +132,9 @@ def start_gmail_auto_watcher(user_id: int, chat_id: int = None, duration_seconds
                     print(f"[AutoWatcher] Error in loop for {user_id}: {e}")
                 await asyncio.sleep(interval)
 
-        # When 5-minute timer expires, edit active variant message in-place to "Gmail Expired"
-        if loop.time() >= watcher_end_times.get(user_id, 0):
-            print(f"[AutoWatcher] 5-min watcher expired for user {user_id}")
+        # When finite timer expires, edit active variant message in-place to "Gmail Expired"
+        if loop.time() >= watcher_end_times.get(user_id, 0) and watcher_end_times.get(user_id, 0) != float('inf'):
+            print(f"[AutoWatcher] Watcher expired for user {user_id}")
             var_msg_id = user_variant_msg_ids.get(user_id)
             if var_msg_id:
                 try:
@@ -550,6 +546,16 @@ async def callback_dispatcher(event):
 
 # ==================== BOT STARTUP ====================
 
+async def start_all_permanent_watchers():
+    all_accounts = await get_all_gmail_accounts()
+    print(f"[Startup] Restoring 24/7 background watchers for {len(all_accounts)} connected Gmail account(s)...")
+    for acc in all_accounts:
+        user_id = acc["user_id"]
+        start_gmail_auto_watcher(user_id, duration_seconds=None, interval=0.4)
+        if GOOGLE_PUBSUB_TOPIC and acc.get("access_token"):
+            w_res = await setup_gmail_watch(acc["access_token"], GOOGLE_PUBSUB_TOPIC)
+            print(f"[Startup] Gmail watch for user {user_id} setup status: {w_res.get('success')}")
+
 async def main():
     print("Initializing Database...")
     await init_db()
@@ -559,6 +565,17 @@ async def main():
     me = await bot.get_me()
     print(f"Bot started successfully as @{me.username} ({me.first_name})")
     
+    # Restore permanent 24/7 watchers for all connected accounts
+    await start_all_permanent_watchers()
+
+    # Start Webhook HTTP Server
+    app = create_webhook_app(bot_instance=bot)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, WEBHOOK_HOST, WEBHOOK_PORT)
+    await site.start()
+    print(f"🚀 Webhook HTTP Server running at http://{WEBHOOK_HOST}:{WEBHOOK_PORT}/ (Endpoints: POST /webhook/gmail | POST /webhook/tempmail)")
+
     await bot.run_until_disconnected()
 
 if __name__ == "__main__":
