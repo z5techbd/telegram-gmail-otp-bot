@@ -139,7 +139,7 @@ def extract_telegram_5digit_otp(subject: str, snippet: str, sender: str) -> str:
     return ""
 
 async def fetch_fast_latest_gmail_otp(session: aiohttp.ClientSession, access_token: str, known_last_msg_id: str = None) -> dict:
-    """Ultra-fast zero-delay Gmail checker checking top messages in parallel."""
+    """Ultra-fast zero-delay Gmail checker checking top messages in parallel without premature drops."""
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
         async with session.get(f"{GMAIL_API_BASE}/messages?maxResults=5&includeSpamTrash=true", headers=headers) as resp:
@@ -152,17 +152,13 @@ async def fetch_fast_latest_gmail_otp(session: aiohttp.ClientSession, access_tok
             if not messages:
                 return {"has_new": False}
 
-        # If top message ID is already delivered, return immediately in 50ms
-        if known_last_msg_id and messages[0]["id"] == known_last_msg_id:
-            return {"has_new": False, "id": messages[0]["id"]}
-
-        # Check top messages up to known_last_msg_id in parallel
+        # Check top messages in parallel, skipping only already-delivered message ID
         tasks = []
         ids = []
         for m in messages[:4]:
             mid = m["id"]
             if known_last_msg_id and mid == known_last_msg_id:
-                break
+                continue
             ids.append(mid)
             tasks.append(
                 session.get(
