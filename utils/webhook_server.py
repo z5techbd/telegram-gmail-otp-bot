@@ -7,6 +7,9 @@ from utils.gmail_api import fetch_fast_latest_gmail_otp, refresh_access_token
 from utils.keyboards import get_otp_delivery_menu
 from utils.emojis import TG_STAR
 
+# Global set to track processed message IDs across concurrent webhook requests
+processed_msg_ids = set()
+
 async def handle_health_check(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "service": "gtmail-bot-webhook"})
 
@@ -16,7 +19,6 @@ async def handle_gmail_webhook(request: web.Request) -> web.Response:
     print(f"[WebhookHTTP] 📥 Incoming Webhook HTTP POST request received!")
     try:
         data = await request.json()
-        print(f"[WebhookHTTP] Payload: {json.dumps(data)}")
     except Exception as err:
         print(f"[WebhookHTTP] Failed to parse JSON body: {err}")
         return web.json_response({"error": "Invalid JSON"}, status=400)
@@ -26,7 +28,6 @@ async def handle_gmail_webhook(request: web.Request) -> web.Response:
     if "message" in data and "data" in data["message"]:
         try:
             raw_payload = base64.b64decode(data["message"]["data"]).decode("utf-8")
-            print(f"[WebhookHTTP] Decoded Pub/Sub data: {raw_payload}")
             payload_json = json.loads(raw_payload)
             email_address = payload_json.get("emailAddress")
         except Exception as err:
@@ -38,7 +39,6 @@ async def handle_gmail_webhook(request: web.Request) -> web.Response:
 
     all_accounts = await get_all_gmail_accounts()
     if not all_accounts:
-        print(f"[WebhookHTTP] No registered Gmail accounts in database.")
         return web.json_response({"status": "ignored", "reason": "No accounts registered"})
 
     # Filter target accounts
@@ -48,14 +48,11 @@ async def handle_gmail_webhook(request: web.Request) -> web.Response:
             if acc["email"].lower() == email_address.lower():
                 target_accounts.append(acc)
     else:
-        # If Pub/Sub envelope didn't include emailAddress, check all connected accounts
         target_accounts = all_accounts
 
     if not target_accounts:
-        print(f"[WebhookHTTP] Email '{email_address}' not found in database.")
         return web.json_response({"status": "ignored", "reason": "Email account not registered"})
 
-    otp_delivered = False
     for target_acc in target_accounts:
         user_id = target_acc["user_id"]
         access_token = target_acc["access_token"]
@@ -74,17 +71,25 @@ async def handle_gmail_webhook(request: web.Request) -> web.Response:
         if fast_res.get("has_new"):
             found_otp = fast_res.get("otp")
             found_msg_id = fast_res.get("id")
-            if found_otp and found_msg_id and found_msg_id != last_delivered_msg_id:
+            
+            # Atomic deduplication check
+            if found_otp and found_msg_id:
+                if found_msg_id in processed_msg_ids or found_msg_id == last_delivered_msg_id:
+                    print(f"[WebhookHTTP] Message {found_msg_id} already processed/delivered. Skipping duplicate.")
+                    return web.json_response({"status": "already_processed"})
+                
+                # Mark as processed IMMEDIATELY to block concurrent race conditions
+                processed_msg_ids.add(found_msg_id)
                 await update_last_delivered_otp(user_id, found_msg_id, found_otp)
+                
                 if bot:
                     try:
                         otp_msg_text = f"{TG_STAR} <b>New OTP Received</b>"
                         await bot.send_message(user_id, otp_msg_text, parse_mode="html", buttons=get_otp_delivery_menu(found_otp))
                         print(f"[WebhookHTTP] ⚡ INSTANT OTP Delivered via Webhook to user {user_id}: {found_otp}")
-                        otp_delivered = True
                     except Exception as send_err:
                         print(f"[WebhookHTTP] Error sending Telegram message to {user_id}: {send_err}")
-            return web.json_response({"status": "otp_delivered", "otp": found_otp})
+                return web.json_response({"status": "otp_delivered", "otp": found_otp})
 
     return web.json_response({"status": "processed"})
 
